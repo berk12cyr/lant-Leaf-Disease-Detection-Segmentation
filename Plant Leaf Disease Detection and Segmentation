@@ -1,0 +1,115 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input, decode_predictions
+
+def load_and_resize_image(path, size=(224,224)):
+    img = cv2.imread(path)
+    if img is None:
+        raise FileNotFoundError(f"Resim açılamadı: {path}")
+    img_resized = cv2.resize(img, size)
+    return img_resized
+
+def segment_green_areas(img_bgr):
+    """Yaprak için yeşil tonlarını maskeler (HSV renk uzayında)."""
+    img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    lower_green = np.array([25, 40, 40])
+    upper_green = np.array([85, 255, 255])
+    mask = cv2.inRange(img_hsv, lower_green, upper_green)
+    return mask
+
+def segment_diseased_areas(img_bgr):
+    """Hastalıklı alanları kırmızımsı-sarımsı renk tonlarında maskeler."""
+    img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    lower_hue = np.array([0, 50, 50])
+    upper_hue = np.array([20, 255, 255])
+    mask = cv2.inRange(img_hsv, lower_hue, upper_hue)
+    return mask
+
+def calculate_disease_percentage(disease_mask, leaf_mask):
+    """Hastalıklı alan yüzdesini, yaprak alanına göre hesaplar."""
+    disease_area = cv2.countNonZero(disease_mask)
+    leaf_area = cv2.countNonZero(leaf_mask)
+    if leaf_area == 0:
+        return 0
+    return (disease_area / leaf_area) * 100
+
+def predict_imagenet_class(img_bgr):
+    """MobileNetV2 ile ImageNet sınıflandırması yapar."""
+    model = MobileNetV2(weights='imagenet')
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    img_resized = cv2.resize(img_rgb, (224, 224))
+    x = preprocess_input(np.expand_dims(img_resized, axis=0))
+    preds = model.predict(x)
+    decoded = decode_predictions(preds, top=3)[0]
+    return decoded
+
+def extract_leaf_contour_features(img_bgr):
+    """Yaprak konturunu çıkarır ve alan, çevre, yuvarlaklık hesaplar."""
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(img_gray, (7,7), 0)
+    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thresh = 255 - thresh  # Tersle
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise ValueError("Kontur bulunamadı!")
+    largest_contour = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest_contour)
+    perimeter = cv2.arcLength(largest_contour, True)
+    circularity = 4 * np.pi * (area / (perimeter ** 2)) if perimeter != 0 else 0
+    return thresh, largest_contour, area, perimeter, circularity
+
+def draw_contour(img_bgr, contour):
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    img_copy = img_rgb.copy()
+    cv2.drawContours(img_copy, [contour], -1, (255, 0, 0), 3)
+    return img_copy
+
+def show_images(images_titles):
+    """Birden fazla resmi yan yana gösterir."""
+    n = len(images_titles)
+    plt.figure(figsize=(5*n,5))
+    for i, (img, title) in enumerate(images_titles):
+        plt.subplot(1, n, i+1)
+        if len(img.shape) == 2:  # grayscale
+            plt.imshow(img, cmap='gray')
+        else:
+            plt.imshow(img)
+        plt.title(title)
+        plt.axis('off')
+    plt.show()
+
+def main():
+    img_path = "yaprak1.jpg"
+    try:
+        img = load_and_resize_image(img_path)
+
+        leaf_mask = segment_green_areas(img)
+        diseased_mask = segment_diseased_areas(img)
+        
+        disease_percent = calculate_disease_percentage(diseased_mask, leaf_mask)
+        print(f"Hastalıklı Alan Yüzdesi: %{disease_percent:.2f}")
+        
+        predictions = predict_imagenet_class(img)
+        print("📌 ImageNet Tahminleri:")
+        for i, (id, label, score) in enumerate(predictions):
+            print(f"{i+1}. {label} ({score*100:.2f}%)")
+
+        thresh, contour, area, perimeter, circ = extract_leaf_contour_features(img)
+        print(f"Yaprak Alanı: {area:.2f} px, Çevre: {perimeter:.2f} px, Yuvarlaklık: {circ:.3f}")
+
+        img_contour = draw_contour(img, contour)
+
+        show_images([
+            (cv2.cvtColor(img, cv2.COLOR_BGR2RGB), "Orijinal Yaprak"),
+            (leaf_mask, "Yeşil Alan Maskesi"),
+            (diseased_mask, "Hastalıklı Alan Maskesi"),
+            (img_contour, "Yaprak Konturu"),
+            (thresh, "Segmentasyon (Eşikleme)")
+        ])
+
+    except Exception as e:
+        print("Hata:", e)
+
+if __name__ == "__main__":
+    main()
